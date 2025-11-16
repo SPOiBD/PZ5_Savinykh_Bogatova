@@ -1,0 +1,473 @@
+# file: off_gui.py
+import sys
+import requests
+
+from PyQt6.QtWidgets import (
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QComboBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QMessageBox,
+    QFrame,
+    QProgressBar,
+    QHeaderView,
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
+
+BASE = "https://world.openfoodfacts.org"
+
+HEADERS = {
+    "User-Agent": "Darcons-Trade-CalorieFetcher/1.0 (+https://darcons-trade.example)"
+}
+
+
+class SearchThread(QThread):
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def init(self, search_type, query):
+        super().init()
+        self.search_type = search_type
+        self.query = query
+
+    def run(self):
+        try:
+            if self.search_type == "barcode":
+                data = get_product_by_barcode(self.query)
+                self.finished.emit(data)
+            else:
+                data = search_products(self.query, page_size=15)  # Увеличили количество результатов
+                self.finished.emit(data)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+def get_product_by_barcode(barcode: str, fields=None, lang="ru", country="ru") -> dict:
+    """
+    Получение конкретного продукта по штрихкоду (API v2).
+    """
+    if fields is None:
+        fields = "code,product_name,nutriments,brands,quantity,serving_size,language,lang,lc"
+
+    url = f"{BASE}/api/v2/product/{barcode}"
+    params = {"fields": fields, "lc": lang, "cc": country}
+
+    r = requests.get(url, headers=HEADERS, params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def search_products(query: str, page_size=15, fields=None, lang="ru", country="ru") -> dict:  # Увеличили page_size
+    """
+    Поиск продуктов по тексту (Search API v2).
+    """
+    if fields is None:
+        fields = "code,product_name,brands,nutriments,quantity,serving_size,ecoscore_grade"
+
+    url = f"{BASE}/api/v2/search"
+    params = {
+        "search_terms": query,
+        "fields": fields,
+        "page_size": page_size,
+        "lc": lang,
+        "cc": country,
+    }
+
+    r = requests.get(url, headers=HEADERS, params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def extract_kcal(nutriments: dict) -> dict:
+    """
+    Извлекает калорийность и БЖУ.
+    Возвращает значения на 100 г и на порцию (если доступно).
+    """
+    get = nutriments.get
+    data = {
+        "kcal_100g": get("energy-kcal_100g") or get("energy-kcal_value"),
+        "protein_100g": get("proteins_100g"),
+        "fat_100g": get("fat_100g"),
+        "carbs_100g": get("carbohydrates_100g"),
+        "kcal_serving": get("energy-kcal_serving"),
+        "protein_serving": get("proteins_serving"),
+        "fat_serving": get("fat_serving"),
+        "carbs_serving": get("carbohydrates_serving"),
+    }
+    return {k: v for k, v in data.items() if v is not None}
+
+
+def format_product_details(product: dict) -> str:
+    """
+    Формирует текст с информацией о продукте для отображения в интерфейсе.
+    """
+    name = product.get("product_name") or "—"
+    brand = product.get("brands") or "—"
+    code = product.get("code") or "—"
+    quantity = product.get("quantity") or "—"
+    serving = product.get("serving_size") or "—"
+
+    nutr = extract_kcal(product.get("nutriments", {}))
+
+    lines = [
+        f"Название: {name}",
+        f"Бренд: {brand}",
+        f"Штрихкод: {code}",
+        f"Упаковка: {quantity}",
+        f"Порция: {serving}",
+        "",
+        "Питательные вещества:"
+    ]
+
+    if not nutr:
+        lines.append("  данные о БЖУ не найдены")
+    else:
+        if "kcal_100g" in nutr:
+            lines.append(f"  Калории на 100 г: {nutr['kcal_100g']}")
+        if "protein_100g" in nutr:
+            lines.append(f"  Белок на 100 г: {nutr['protein_100g']} г")
+        if "fat_100g" in nutr:
+            lines.append(f"  Жиры на 100 г: {nutr['fat_100g']} г")
+        if "carbs_100g" in nutr:
+            lines.append(f"  Углеводы на 100 г: {nutr['carbs_100g']} г")
+if any(k.endswith("_serving") for k in nutr.keys()):
+            lines.append("")
+            lines.append("На порцию:")
+            if "kcal_serving" in nutr:
+                lines.append(f"  Калории на порцию: {nutr['kcal_serving']}")
+            if "protein_serving" in nutr:
+                lines.append(f"  Белок на порцию: {nutr['protein_serving']} г")
+            if "fat_serving" in nutr:
+                lines.append(f"  Жиры на порцию: {nutr['fat_serving']} г")
+            if "carbs_serving" in nutr:
+                lines.append(f"  Углеводы на порцию: {nutr['carbs_serving']} г")
+
+    return "\n".join(lines)
+
+
+class MainWindow(QWidget):
+    def init(self):
+        super().init()
+
+        self.setWindowTitle("Поиск калорийности продуктов")
+        self.resize(1000, 800)  # Увеличили размер окна
+
+        # Современные стили
+        self.setStyleSheet("""
+            QWidget {
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 13px;
+                background-color: #f5f7fa;
+            }
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                font-weight: bold;
+                border-radius: 5px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+            QLineEdit {
+                padding: 10px;
+                border: 2px solid #ddd;
+                border-radius: 5px;
+                background-color: white;
+            }
+            QLineEdit:focus {
+                border-color: #4CAF50;
+            }
+            QComboBox {
+                padding: 8px;
+                border: 2px solid #ddd;
+                border-radius: 5px;
+                background-color: white;
+            }
+            QComboBox:focus {
+                border-color: #4CAF50;
+            }
+            QTableWidget {
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                background-color: white;
+                gridline-color: #eee;
+                font-size: 12px;
+            }
+            QTableWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #f0f0f0;
+            }
+            QTableWidget::item:selected {
+                background-color: #e3f2fd;
+                color: black;
+            }
+            QHeaderView::section {
+                background-color: #e8f5e8;
+                padding: 12px;
+                font-weight: bold;
+                border: none;
+                font-size: 12px;
+            }
+            QTextEdit {
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                background-color: white;
+                padding: 10px;
+                font-size: 12px;
+            }
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+                border: 1px solid #e0e0e0;
+            }
+            QProgressBar {
+                border: none;
+                border-radius: 4px;
+                background-color: #f0f0f0;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 4px;
+            }
+        """)
+
+        self.current_products = []
+        self.search_thread = None
+
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        self.setLayout(main_layout)
+# Заголовок
+        title_label = QLabel("Поиск калорийности продуктов")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setStyleSheet("color: #2c3e50; margin-bottom: 10px;")
+        main_layout.addWidget(title_label)
+
+        # --- Панель поиска ---
+        search_frame = QFrame()
+        search_frame.setStyleSheet("QFrame { padding: 15px; }")
+        search_layout = QVBoxLayout(search_frame)
+
+        # Первая строка - выбор режима
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Режим поиска:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["По штрихкоду", "По названию"])
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.mode_combo)
+        mode_layout.addStretch()
+        search_layout.addLayout(mode_layout)
+
+        # Вторая строка - поле ввода и кнопка
+        input_layout = QHBoxLayout()
+        self.query_edit = QLineEdit()
+        self.query_edit.setPlaceholderText("Введите штрихкод или название продукта")
+        self.query_edit.returnPressed.connect(self.on_search_clicked)
+
+        self.search_button = QPushButton("Найти")
+        self.search_button.clicked.connect(self.on_search_clicked)
+
+        input_layout.addWidget(self.query_edit)
+        input_layout.addWidget(self.search_button)
+        search_layout.addLayout(input_layout)
+
+        # Прогресс-бар
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        search_layout.addWidget(self.progress_bar)
+
+        main_layout.addWidget(search_frame)
+
+        # --- Таблица результатов ---
+        results_frame = QFrame()
+        results_layout = QVBoxLayout(results_frame)
+
+        results_label = QLabel("Результаты поиска:")
+        results_label.setStyleSheet("font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+        results_layout.addWidget(results_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)  # Добавили колонку для количества
+        self.table.setHorizontalHeaderLabels(["Штрихкод", "Название", "Бренд", "Ккал/100г", "Количество"])
+
+        # Настройка таблицы для лучшего отображения
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
+        self.table.setMinimumHeight(250)  # Минимальная высота таблицы
+        self.table.verticalHeader().setVisible(False)  # Скрываем вертикальные заголовки
+
+        # Настройка растягивания колонок
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Штрихкод - по содержимому
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # Название - растягивается
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Бренд - по содержимому
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Ккал - по содержимому
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Количество - по содержимому
+
+        self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
+        self.table.hide()
+
+        results_layout.addWidget(self.table)
+        main_layout.addWidget(results_frame)
+
+        # --- Детальная информация ---
+        details_frame = QFrame()
+        details_layout = QVBoxLayout(details_frame)
+
+        details_label = QLabel("Информация о продукте:")
+        details_label.setStyleSheet("font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+        details_layout.addWidget(details_label)
+
+        self.details_text = QTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setMinimumHeight(200)
+        details_layout.addWidget(self.details_text)
+
+        main_layout.addWidget(details_frame)
+# Статус бар
+        self.status_label = QLabel("Готов к поиску")
+        self.status_label.setStyleSheet("color: #7f8c8d; font-style: italic; padding: 5px; border-top: 1px solid #ddd;")
+        main_layout.addWidget(self.status_label)
+
+        self.on_mode_changed(0)
+
+    def on_mode_changed(self, index: int):
+        mode = self.mode_combo.currentText()
+        self.details_text.clear()
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        self.status_label.setText("Готов к поиску")
+
+        if mode == "По штрихкоду":
+            self.table.hide()
+            self.query_edit.setPlaceholderText("Введите штрихкод (например 5449000000996)")
+        else:
+            self.table.show()
+            self.query_edit.setPlaceholderText("Введите название продукта (например 'творог 5%')")
+
+    def on_search_clicked(self):
+        query = self.query_edit.text().strip()
+        if not query:
+            QMessageBox.warning(self, "Ошибка", "Введите запрос для поиска.")
+            return
+
+        mode = self.mode_combo.currentText()
+        search_type = "barcode" if mode == "По штрихкоду" else "name"
+
+        # Блокируем UI во время поиска
+        self.set_ui_enabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText("Выполняется поиск...")
+
+        # Запускаем поиск в отдельном потоке
+        self.search_thread = SearchThread(search_type, query)
+        self.search_thread.finished.connect(self.on_search_finished)
+        self.search_thread.error.connect(self.on_search_error)
+        self.search_thread.start()
+
+    def set_ui_enabled(self, enabled: bool):
+        self.search_button.setEnabled(enabled)
+        self.query_edit.setEnabled(enabled)
+        self.mode_combo.setEnabled(enabled)
+
+    def on_search_finished(self, data):
+        self.progress_bar.setVisible(False)
+        self.set_ui_enabled(True)
+
+        mode = self.mode_combo.currentText()
+
+        if mode == "По штрихкоду":
+            self.handle_barcode_result(data)
+        else:
+            self.handle_name_result(data)
+
+    def on_search_error(self, error_msg):
+        self.progress_bar.setVisible(False)
+        self.set_ui_enabled(True)
+        self.status_label.setText("Ошибка при поиске")
+
+        QMessageBox.critical(self, "Ошибка", f"Не удалось выполнить поиск:\n{error_msg}")
+
+    def handle_barcode_result(self, data):
+        product = data.get("product")
+        if not product:
+            QMessageBox.information(self, "Результат", "Продукт не найден.")
+            self.status_label.setText("Продукт не найден")
+            return
+
+        details = format_product_details(product)
+        self.details_text.setPlainText(details)
+        self.status_label.setText("Продукт найден")
+
+    def handle_name_result(self, data):
+        products = data.get("products", [])
+        if not products:
+            QMessageBox.information(self, "Результат", "Ничего не найдено.")
+            self.status_label.setText("Ничего не найдено")
+            return
+
+        self.current_products = products
+        self.table.setRowCount(len(products))
+
+        for row, p in enumerate(products):
+            code = p.get("code") or ""
+            name = p.get("product_name") or ""
+            brand = p.get("brands") or ""
+            quantity = p.get("quantity") or ""
+            nutr = extract_kcal(p.get("nutriments", {}))
+            kcal_100g = nutr.get("kcal_100g", "")
+
+            self.table.setItem(row, 0, QTableWidgetItem(code))
+            self.table.setItem(row, 1, QTableWidgetItem(name))
+            self.table.setItem(row, 2, QTableWidgetItem(brand))
+            self.table.setItem(row, 3, QTableWidgetItem(str(kcal_100g)))
+            self.table.setItem(row, 4, QTableWidgetItem(quantity))
+
+        # Автоматическое растягивание колонок
+        self.table.resizeColumnsToContents()
+
+        # Устанавливаем минимальную ширину для колонки с названием
+        self.table.setColumnWidth(1, 250)
+
+        self.status_label.setText(f"Найдено продуктов: {len(products)}")
+def on_table_double_clicked(self, row: int, column: int):
+        if 0 <= row < len(self.current_products):
+            product = self.current_products[row]
+            details = format_product_details(product)
+            self.details_text.setPlainText(details)
+            self.status_label.setText("Информация о выбранном продукте")
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if name == "main":
+    main()
